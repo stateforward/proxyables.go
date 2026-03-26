@@ -43,7 +43,7 @@ func ImportFrom(conn net.Conn, opts *ImportOptions) (*ProxyCursor, *ImportedProx
 	if err != nil {
 		return nil, nil, err
 	}
-	return imported.Root(), imported, nil
+	return NewProxyCursor(imported, nil), imported, nil
 }
 
 // ExecuteAsync is a helper to execute a cursor and return a channel for select usage.

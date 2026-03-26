@@ -43,13 +43,13 @@ exported, _ := proxyables.Export(conn, &API{}, nil)
 ```go
 import "github.com/stateforward/proxyables.go"
 
-imported, _ := proxyables.ImportFrom(conn, nil)
+proxy, _, _ := proxyables.ImportFrom(conn, nil)
 
 // Chain instructions and execute
-result, _ := imported.Root().Get("Echo").Apply("hello").Exec(ctx)
+result, _ := proxy.Get("Echo").Apply("hello").Exec(ctx)
 // result: "echo hello"
 
-result, _ = imported.Root().Get("Compute").Apply(10, 20).Exec(ctx)
+result, _ = proxy.Get("Compute").Apply(10, 20).Exec(ctx)
 // result: 30
 ```
 

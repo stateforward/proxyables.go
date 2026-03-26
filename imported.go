@@ -36,7 +36,14 @@ func NewImportedProxyable(conn net.Conn, opts *ImportOptions) (*ImportedProxyabl
 }
 
 // Root returns a cursor at the remote root object.
+//
+// Deprecated: prefer using the root cursor returned by ImportFrom.
 func (i *ImportedProxyable) Root() *ProxyCursor {
+	return NewProxyCursor(i, nil)
+}
+
+// Cursor returns the remote root cursor for users who prefer PascalCase symmetry.
+func (i *ImportedProxyable) Cursor() *ProxyCursor {
 	return NewProxyCursor(i, nil)
 }
 
