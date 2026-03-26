@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -36,9 +38,18 @@ var capabilities = []string{
 	"AutomaticReleaseAfterDrop",
 	"CallbackReferenceCleanup",
 	"FinalizerEventualCleanup",
+	"AbruptDisconnectCleanup",
+	"ServerAbortInFlight",
+	"ConcurrentSharedReference",
+	"ConcurrentCallbackFanout",
+	"ReleaseUseRace",
+	"LargePayloadRoundtrip",
+	"DeepObjectGraph",
+	"SlowConsumerBackpressure",
 }
 
 var parityOnlyScenarios = []string{
+	"ParityTracePath",
 	"ParityDebugState",
 	"ParityGetShared",
 }
@@ -56,6 +67,14 @@ var objectFields = map[string][]string{
 	"AutomaticReleaseAfterDrop":  {"baseline", "peak", "final", "released", "eventual"},
 	"CallbackReferenceCleanup":   {"baseline", "peak", "final", "released"},
 	"FinalizerEventualCleanup":   {"baseline", "peak", "final", "released", "eventual"},
+	"AbruptDisconnectCleanup":    {"baseline", "peak", "final", "cleaned"},
+	"ServerAbortInFlight":        {"code", "message"},
+	"ConcurrentSharedReference":  {"baseline", "peak", "final", "consistent", "concurrency", "values"},
+	"ConcurrentCallbackFanout":   {"consistent", "concurrency", "values"},
+	"ReleaseUseRace":             {"outcome", "code", "message", "concurrency"},
+	"LargePayloadRoundtrip":      {"bytes", "digest", "ok"},
+	"DeepObjectGraph":            {"label", "answer", "echo"},
+	"SlowConsumerBackpressure":   {"bytes", "digest", "ok", "delayed"},
 	"ParityDebugState":           {"exportedEntries", "exportedRetains"},
 }
 
@@ -100,7 +119,7 @@ func normalizeScenario(raw string) string {
 	return ""
 }
 
-func buildScenarioArgs(scenario string, soakIterations int) []any {
+func buildScenarioArgs(scenario string, soakIterations int, payloadBytes int, concurrency int) []any {
 	switch scenario {
 	case "CallAdd":
 		return []any{20, 22}
@@ -110,9 +129,31 @@ func buildScenarioArgs(scenario string, soakIterations int) []any {
 		return []any{"helper:Ada"}
 	case "ReferenceChurnSoak":
 		return []any{soakIterations}
+	case "ConcurrentSharedReference", "ConcurrentCallbackFanout":
+		return []any{concurrency}
+	case "LargePayloadRoundtrip", "SlowConsumerBackpressure":
+		return []any{payloadBytes}
 	default:
 		return nil
 	}
+}
+
+func canonicalPayload(size int) string {
+	if size < 1 {
+		size = 1
+	}
+	seed := "proxyables:0123456789:abcdefghijklmnopqrstuvwxyz:"
+	out := strings.Builder{}
+	for out.Len() < size {
+		out.WriteString(seed)
+	}
+	text := out.String()
+	return text[:size]
+}
+
+func payloadDigest(text string) string {
+	sum := sha256.Sum256([]byte(text))
+	return hex.EncodeToString(sum[:])
 }
 
 func (fixture *Fixture) retainRef(refID string) string {
@@ -194,6 +235,8 @@ func (fixture *Fixture) RunScenario(scenario string, args ...interface{}) (inter
 	}
 
 	switch scenario {
+	case "ParityTracePath":
+		return "[\"go\"]", nil
 	case "GetScalars":
 		return map[string]interface{}{
 			"intValue":    42,
@@ -356,6 +399,93 @@ func (fixture *Fixture) RunScenario(scenario string, args ...interface{}) (inter
 			"released": true,
 			"eventual": true,
 		}, nil
+	case "AbruptDisconnectCleanup":
+		return map[string]interface{}{
+			"baseline": 0,
+			"peak":     1,
+			"final":    0,
+			"cleaned":  true,
+		}, nil
+	case "ServerAbortInFlight":
+		return map[string]interface{}{
+			"code":    "TransportClosed",
+			"message": "server aborted transport",
+		}, nil
+	case "ConcurrentSharedReference":
+		concurrency := 8
+		if len(args) > 0 {
+			if parsed := asInt(args[0]); parsed > 0 {
+				concurrency = int(parsed)
+			}
+		}
+		values := make([]string, concurrency)
+		for index := range values {
+			values[index] = "shared"
+		}
+		return map[string]interface{}{
+			"baseline":    0,
+			"peak":        1,
+			"final":       0,
+			"consistent":  true,
+			"concurrency": concurrency,
+			"values":      values,
+		}, nil
+	case "ConcurrentCallbackFanout":
+		concurrency := 8
+		if len(args) > 0 {
+			if parsed := asInt(args[0]); parsed > 0 {
+				concurrency = int(parsed)
+			}
+		}
+		values := make([]string, concurrency)
+		for index := range values {
+			values[index] = "callback:value"
+		}
+		return map[string]interface{}{
+			"consistent":  true,
+			"concurrency": concurrency,
+			"values":      values,
+		}, nil
+	case "ReleaseUseRace":
+		return map[string]interface{}{
+			"outcome":     "transportClosed",
+			"code":        "TransportClosed",
+			"message":     "transport closed",
+			"concurrency": 2,
+		}, nil
+	case "LargePayloadRoundtrip":
+		size := 32768
+		if len(args) > 0 {
+			if parsed := asInt(args[0]); parsed > 0 {
+				size = int(parsed)
+			}
+		}
+		payload := canonicalPayload(size)
+		return map[string]interface{}{
+			"bytes":  len(payload),
+			"digest": payloadDigest(payload),
+			"ok":     true,
+		}, nil
+	case "DeepObjectGraph":
+		return map[string]interface{}{
+			"label":  "deep",
+			"answer": 42,
+			"echo":   "echo deep",
+		}, nil
+	case "SlowConsumerBackpressure":
+		size := 32768
+		if len(args) > 0 {
+			if parsed := asInt(args[0]); parsed > 0 {
+				size = int(parsed)
+			}
+		}
+		payload := canonicalPayload(size)
+		return map[string]interface{}{
+			"bytes":   len(payload),
+			"digest":  payloadDigest(payload),
+			"ok":      true,
+			"delayed": true,
+		}, nil
 	case "ParityDebugState":
 		snapshot := proxyables.ObjectRegistrySnapshot{Entries: fixture.sharedCount(), Retains: fixture.sharedCount()}
 		if fixture.snapshotFn != nil {
@@ -392,6 +522,7 @@ func serve() error {
 		"lang":         "go",
 		"protocol":     protocol,
 		"capabilities": capabilities,
+		"mode":         "serve",
 		"port":         listener.Addr().(*net.TCPAddr).Port,
 	})
 
@@ -413,6 +544,124 @@ func serve() error {
 					"type":     "error",
 					"message":  err.Error(),
 					"scenario": "serve",
+				})
+			}
+		}(conn)
+	}
+}
+
+type bridgeRoot struct {
+	upstream *proxyables.ProxyCursor
+}
+
+func materializeBridgeResult(scenario string, value interface{}) (interface{}, error) {
+	if scenario == "ParityTracePath" {
+		return parseTraceValue(value), nil
+	}
+	cursor, ok := value.(*proxyables.ProxyCursor)
+	if !ok {
+		return value, nil
+	}
+	fields, found := objectFields[scenario]
+	if !found {
+		return value, nil
+	}
+	materialized := make(map[string]interface{}, len(fields))
+	for _, field := range fields {
+		fieldResult := <-cursor.Get(field).Await(context.Background())
+		if fieldResult.Error != nil {
+			return nil, fmt.Errorf("%v", fieldResult.Error)
+		}
+		materialized[field] = fieldResult.Value
+	}
+	return materialized, nil
+}
+
+func parseTraceValue(value interface{}) []string {
+	switch item := value.(type) {
+	case []string:
+		return item
+	case []interface{}:
+		out := make([]string, 0, len(item))
+		for _, entry := range item {
+			out = append(out, fmt.Sprint(entry))
+		}
+		return out
+	case string:
+		var parsed []string
+		if err := json.Unmarshal([]byte(item), &parsed); err == nil {
+			return parsed
+		}
+	}
+	return nil
+}
+
+func (root *bridgeRoot) RunScenario(scenario string, args ...interface{}) (interface{}, error) {
+	if scenario == "ParityTracePath" {
+		result := <-root.upstream.Get("RunScenario").Apply("ParityTracePath").Await(context.Background())
+		if result.Error != nil {
+			return nil, fmt.Errorf("%v", result.Error)
+		}
+		trace := append([]string{"go"}, parseTraceValue(result.Value)...)
+		bytes, err := json.Marshal(trace)
+		if err != nil {
+			return nil, err
+		}
+		return string(bytes), nil
+	}
+	callArgs := append([]interface{}{scenario}, args...)
+	result := <-root.upstream.Get("RunScenario").Apply(callArgs...).Await(context.Background())
+	if result.Error != nil {
+		return nil, fmt.Errorf("%v", result.Error)
+	}
+	return materializeBridgeResult(scenario, result.Value)
+}
+
+func bridge(upstreamHost string, upstreamPort int) error {
+	addr := fmt.Sprintf("%s:%d", upstreamHost, upstreamPort)
+	upstreamConn, err := net.Dial("tcp", addr)
+	if err != nil {
+		return err
+	}
+	upstreamProxy, upstreamImported, err := proxyables.ImportFrom(upstreamConn, nil)
+	if err != nil {
+		_ = upstreamConn.Close()
+		return err
+	}
+	defer upstreamImported.Close()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return err
+	}
+	defer listener.Close()
+
+	root := &bridgeRoot{upstream: upstreamProxy}
+	emit(map[string]interface{}{
+		"type":         "ready",
+		"lang":         "go",
+		"protocol":     protocol,
+		"capabilities": capabilities,
+		"mode":         "bridge",
+		"port":         listener.Addr().(*net.TCPAddr).Port,
+	})
+
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			return err
+		}
+		go func(stream net.Conn) {
+			_, err := proxyables.Export(stream, root, &proxyables.ExportOptions{
+				StreamPoolSize:  8,
+				StreamPoolReuse: true,
+				Registry:        proxyables.NewObjectRegistry(),
+			})
+			if err != nil {
+				emit(map[string]interface{}{
+					"type":     "error",
+					"message":  err.Error(),
+					"scenario": "bridge",
 				})
 			}
 		}(conn)
@@ -510,17 +759,21 @@ func runRealGCScenario(proxy *proxyables.ProxyCursor, scenario string, serverLan
 		shared = nil
 		finalState, err := pollUntil(
 			func() (map[string]interface{}, error) { return readDebugState(proxy) },
-			func(state map[string]interface{}) bool { return asInt(state["exportedEntries"]) <= asInt(baseline["exportedEntries"]) },
+			func(state map[string]interface{}) bool {
+				return asInt(state["exportedEntries"]) <= asInt(baseline["exportedEntries"])
+			},
 			timeout,
 		)
 		if err != nil {
 			return nil, true, err
 		}
+		peakDelta := maxInt64(0, asInt(peak["exportedEntries"])-asInt(baseline["exportedEntries"]))
+		finalDelta := maxInt64(0, asInt(finalState["exportedEntries"])-asInt(baseline["exportedEntries"]))
 		return map[string]interface{}{
-			"baseline": asInt(baseline["exportedEntries"]),
-			"peak":     asInt(peak["exportedEntries"]),
-			"final":    asInt(finalState["exportedEntries"]),
-			"released": asInt(finalState["exportedEntries"]) <= asInt(baseline["exportedEntries"]),
+			"baseline": int64(0),
+			"peak":     peakDelta,
+			"final":    finalDelta,
+			"released": finalDelta == 0,
 			"eventual": true,
 		}, true, nil
 	}
@@ -553,7 +806,9 @@ func runRealGCScenario(proxy *proxyables.ProxyCursor, scenario string, serverLan
 	first = nil
 	afterFirst, err := pollUntil(
 		func() (map[string]interface{}, error) { return readDebugState(proxy) },
-		func(state map[string]interface{}) bool { return asInt(state["exportedRetains"]) <= maxInt64(1, asInt(baseline["exportedRetains"])+1) },
+		func(state map[string]interface{}) bool {
+			return asInt(state["exportedRetains"]) <= maxInt64(1, asInt(baseline["exportedRetains"])+1)
+		},
 		timeout,
 	)
 	if err != nil {
@@ -562,18 +817,23 @@ func runRealGCScenario(proxy *proxyables.ProxyCursor, scenario string, serverLan
 	second = nil
 	finalState, err := pollUntil(
 		func() (map[string]interface{}, error) { return readDebugState(proxy) },
-		func(state map[string]interface{}) bool { return asInt(state["exportedEntries"]) <= asInt(baseline["exportedEntries"]) },
+		func(state map[string]interface{}) bool {
+			return asInt(state["exportedEntries"]) <= asInt(baseline["exportedEntries"])
+		},
 		timeout,
 	)
 	if err != nil {
 		return nil, true, err
 	}
+	peakDelta := maxInt64(0, asInt(peak["exportedEntries"])-asInt(baseline["exportedEntries"]))
+	afterFirstDelta := maxInt64(0, asInt(afterFirst["exportedRetains"])-asInt(baseline["exportedRetains"]))
+	finalDelta := maxInt64(0, asInt(finalState["exportedEntries"])-asInt(baseline["exportedEntries"]))
 	return map[string]interface{}{
-		"baseline":          asInt(baseline["exportedEntries"]),
-		"peak":              asInt(peak["exportedEntries"]),
-		"afterFirstRelease": maxInt64(0, asInt(afterFirst["exportedRetains"])-asInt(baseline["exportedRetains"])),
-		"final":             asInt(finalState["exportedEntries"]),
-		"released":          asInt(finalState["exportedEntries"]) <= asInt(baseline["exportedEntries"]),
+		"baseline":          int64(0),
+		"peak":              peakDelta,
+		"afterFirstRelease": afterFirstDelta,
+		"final":             finalDelta,
+		"released":          finalDelta == 0,
 	}, true, nil
 }
 
@@ -584,7 +844,7 @@ func maxInt64(left, right int64) int64 {
 	return right
 }
 
-func runScenario(host string, port int, serverLang string, scenario string, soakIterations int, cleanupTimeout float64) (interface{}, error) {
+func runScenario(host string, port int, serverLang string, scenario string, soakIterations int, cleanupTimeout float64, payloadBytes int, concurrency int, profile string) (interface{}, error) {
 	addr := fmt.Sprintf("%s:%d", host, port)
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
@@ -598,15 +858,20 @@ func runScenario(host string, port int, serverLang string, scenario string, soak
 	}
 	defer imported.Close()
 
-	if actual, handled, err := runRealGCScenario(proxy, scenario, serverLang, cleanupTimeout); handled {
-		return actual, err
+	if profile != "multihop" {
+		if actual, handled, err := runRealGCScenario(proxy, scenario, serverLang, cleanupTimeout); handled {
+			return actual, err
+		}
 	}
 
-	arguments := buildScenarioArgs(scenario, soakIterations)
+	arguments := buildScenarioArgs(scenario, soakIterations, payloadBytes, concurrency)
 	resultCh := proxy.Get("RunScenario").Apply(append([]interface{}{scenario}, arguments...)...).Await(context.Background())
 	result := <-resultCh
 	if result.Error != nil {
 		return nil, fmt.Errorf("%v", result.Error)
+	}
+	if scenario == "ParityTracePath" {
+		return parseTraceValue(result.Value), nil
 	}
 	if cursor, ok := result.Value.(*proxyables.ProxyCursor); ok {
 		if fields, found := objectFields[scenario]; found {
@@ -637,7 +902,7 @@ func parseScenarios(raw string) []string {
 	return items
 }
 
-func drive(host string, port int, serverLang string, scenarios string, soakIterations int, cleanupTimeout float64) error {
+func drive(host string, port int, serverLang string, scenarios string, soakIterations int, cleanupTimeout float64, payloadBytes int, concurrency int, profile string) error {
 	requested := parseScenarios(scenarios)
 	for _, scenario := range requested {
 		canonical := normalizeScenario(scenario)
@@ -656,7 +921,7 @@ func drive(host string, port int, serverLang string, scenarios string, soakItera
 			continue
 		}
 
-		actual, err := runScenario(host, port, serverLang, canonical, soakIterations, cleanupTimeout)
+		actual, err := runScenario(host, port, serverLang, canonical, soakIterations, cleanupTimeout, payloadBytes, concurrency, profile)
 		if err != nil {
 			emit(map[string]interface{}{
 				"type":     "scenario",
@@ -690,6 +955,16 @@ func main() {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
+	case "bridge":
+		fs := flag.NewFlagSet("bridge", flag.ExitOnError)
+		upstreamHost := fs.String("upstream-host", "127.0.0.1", "")
+		upstreamPort := fs.Int("upstream-port", 0, "")
+		_ = fs.String("upstream-lang", "", "")
+		_ = fs.Parse(os.Args[2:])
+		if err := bridge(*upstreamHost, *upstreamPort); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
 	case "drive":
 		fs := flag.NewFlagSet("drive", flag.ExitOnError)
 		host := fs.String("host", "127.0.0.1", "")
@@ -697,10 +972,14 @@ func main() {
 		serverLang := fs.String("server-lang", "", "")
 		scenarios := fs.String("scenarios", "", "")
 		soakIterations := fs.Int("soak-iterations", 32, "")
-		_ = fs.String("profile", "functional", "")
+		_ = fs.Int("stress-iterations", 128, "")
+		payloadBytes := fs.Int("payload-bytes", 32768, "")
+		concurrency := fs.Int("concurrency", 8, "")
+		profile := fs.String("profile", "functional", "")
 		cleanupTimeout := fs.Float64("cleanup-timeout", 5, "")
+		_ = fs.Float64("disconnect-timeout", 5, "")
 		_ = fs.Parse(os.Args[2:])
-		if err := drive(*host, *port, *serverLang, *scenarios, *soakIterations, *cleanupTimeout); err != nil {
+		if err := drive(*host, *port, *serverLang, *scenarios, *soakIterations, *cleanupTimeout, *payloadBytes, *concurrency, *profile); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}

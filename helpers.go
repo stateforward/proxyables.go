@@ -352,7 +352,12 @@ func callValue(target interface{}, args []interface{}, executor Executor) (inter
 		}
 	}
 
-	results := v.Call(callArgs)
+	results := func() []reflect.Value {
+		if fnType.IsVariadic() {
+			return v.CallSlice(callArgs)
+		}
+		return v.Call(callArgs)
+	}()
 	if len(results) == 0 {
 		return nil, nil
 	}
