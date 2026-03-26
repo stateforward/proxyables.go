@@ -46,11 +46,17 @@ import "github.com/stateforward/proxyables.go"
 proxy, _, _ := proxyables.ImportFrom(conn, nil)
 
 // Chain instructions and execute
-result, _ := proxy.Get("Echo").Apply("hello").Exec(ctx)
-// result: "echo hello"
+result := <-proxy.Get("Echo").Apply("hello").Await(ctx)
+if result.Error != nil {
+	panic(result.Error)
+}
+_ = result.Value // "echo hello"
 
-result, _ = proxy.Get("Compute").Apply(10, 20).Exec(ctx)
-// result: 30
+result = <-proxy.Get("Compute").Apply(10, 20).Await(ctx)
+if result.Error != nil {
+	panic(result.Error)
+}
+_ = result.Value // 30
 ```
 
 ## Architecture

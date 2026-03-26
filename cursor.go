@@ -54,11 +54,6 @@ func (c *ProxyCursor) Await(ctx context.Context) <-chan Result {
 	return ch
 }
 
-// Exec executes the batch synchronously.
-func (c *ProxyCursor) Exec(ctx context.Context) (interface{}, *ProxyError) {
-	return c.executor.Execute(ctx, c.instructions)
-}
-
 func (c *ProxyCursor) referenceID() (string, bool) {
 	if len(c.instructions) != 1 {
 		return "", false

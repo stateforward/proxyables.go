@@ -1,7 +1,6 @@
 package proxyables
 
 import (
-	"context"
 	"net"
 )
 
@@ -44,11 +43,6 @@ func ImportFrom(conn net.Conn, opts *ImportOptions) (*ProxyCursor, *ImportedProx
 		return nil, nil, err
 	}
 	return NewProxyCursor(imported, nil), imported, nil
-}
-
-// ExecuteAsync is a helper to execute a cursor and return a channel for select usage.
-func ExecuteAsync(ctx context.Context, cursor *ProxyCursor) <-chan Result {
-	return cursor.Await(ctx)
 }
 
 // CreateExportedProxyable is a naming-aligned helper for Export.
