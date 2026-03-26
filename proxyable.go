@@ -44,13 +44,3 @@ func ImportFrom(conn net.Conn, opts *ImportOptions) (*ProxyCursor, *ImportedProx
 	}
 	return NewProxyCursor(imported, nil), imported, nil
 }
-
-// CreateExportedProxyable is a naming-aligned helper for Export.
-func CreateExportedProxyable(conn net.Conn, object interface{}, opts *ExportOptions) (*ExportedProxyable, error) {
-	return Export(conn, object, opts)
-}
-
-// CreateImportedProxyable is a naming-aligned helper for ImportFrom.
-func CreateImportedProxyable(conn net.Conn, opts *ImportOptions) (*ProxyCursor, *ImportedProxyable, error) {
-	return ImportFrom(conn, opts)
-}

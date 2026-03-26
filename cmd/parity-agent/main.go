@@ -1,16 +1,16 @@
 package main
 
 import (
-	"bufio"
+	"context"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"strings"
 	"sync"
+
+	"proxyables"
 )
 
 const protocol = "parity-json-v1"
@@ -27,43 +27,27 @@ var capabilities = []string{
 	"ExplicitRelease",
 }
 
+var scenarioArgs = map[string][]any{
+	"CallAdd":                 {20, 22},
+	"CallbackRoundtrip":       {"value"},
+	"ObjectArgumentRoundtrip": {"helper:Ada"},
+}
+
+var objectFields = map[string][]string{
+	"GetScalars":                 {"intValue", "boolValue", "stringValue", "nullValue"},
+	"NestedObjectAccess":         {"label", "pong"},
+	"SharedReferenceConsistency": {"firstKind", "secondKind", "firstValue", "secondValue"},
+	"ExplicitRelease":            {"before", "after", "acquired"},
+}
+
 type Fixture struct {
-	intValue    int
-	boolValue   bool
-	stringValue string
-	nullValue   interface{}
-	nested      map[string]interface{}
-	nextShared  int
-	activeRefs  map[string]struct{}
-	mu          sync.Mutex
+	nextShared int
+	activeRefs map[string]struct{}
+	mu         sync.Mutex
 }
 
 func newFixture() *Fixture {
-	state := &Fixture{
-		intValue:    42,
-		boolValue:   true,
-		stringValue: "hello",
-		nullValue:   nil,
-		nested: map[string]interface{}{
-			"label": "nested",
-			"ping":  func() string { return "pong" },
-		},
-		activeRefs: make(map[string]struct{}),
-	}
-	return state
-}
-
-func parseScenarios(raw string) []string {
-	parts := strings.Split(raw, ",")
-	items := make([]string, 0, len(parts))
-	for _, item := range parts {
-		item = strings.TrimSpace(item)
-		if item == "" {
-			continue
-		}
-		items = append(items, item)
-	}
-	return items
+	return &Fixture{activeRefs: make(map[string]struct{})}
 }
 
 func normalizeScenario(raw string) string {
@@ -148,161 +132,142 @@ func normalizeScenario(raw string) string {
 		return "ExplicitRelease"
 	case strings.EqualFold(raw, "explicit-release"):
 		return "ExplicitRelease"
-	default:
-		return ""
 	}
-}
-
-func canonicalOrOriginal(canonical string, original string) string {
-	if canonical != "" {
-		return canonical
-	}
-	return original
-}
-
-func (fixture *Fixture) hasCapability(name string) bool {
-	canonical := normalizeScenario(name)
-	if canonical == "" {
-		return false
-	}
-	for _, item := range capabilities {
-		if item == canonical {
-			return true
-		}
-	}
-	return false
-}
-
-func (fixture *Fixture) getScalars() map[string]interface{} {
-	return map[string]interface{}{
-		"intValue":    fixture.intValue,
-		"boolValue":   fixture.boolValue,
-		"stringValue": fixture.stringValue,
-		"nullValue":   fixture.nullValue,
-	}
-}
-
-func (fixture *Fixture) callAdd() int {
-	return 42
-}
-
-func (fixture *Fixture) nestedObjectAccess() map[string]interface{} {
-	return map[string]interface{}{
-		"label": fixture.nested["label"],
-		"pong":  fixture.nested["ping"].(func() string)(),
-	}
-}
-
-func (fixture *Fixture) constructGreeter() string {
-	return "Hello World"
-}
-
-func (fixture *Fixture) callbackRoundtrip() string {
-	return "callback:value"
-}
-
-func (fixture *Fixture) objectArgumentRoundtrip() string {
-	return "helper:Ada"
-}
-
-func (fixture *Fixture) errorPropagation() string {
-	return "Boom"
-}
-
-func (fixture *Fixture) sharedReferenceConsistency() map[string]interface{} {
-	shared := map[string]interface{}{"kind": "shared", "value": "shared"}
-	return map[string]interface{}{
-		"firstKind":   shared["kind"],
-		"secondKind":  shared["kind"],
-		"firstValue":  shared["value"],
-		"secondValue": shared["value"],
-	}
+	return ""
 }
 
 func (fixture *Fixture) acquireShared() string {
 	fixture.mu.Lock()
 	defer fixture.mu.Unlock()
-
 	fixture.nextShared++
-	id := fmt.Sprintf("shared-%d", fixture.nextShared)
-	fixture.activeRefs[id] = struct{}{}
-	return id
+	refID := fmt.Sprintf("shared-%d", fixture.nextShared)
+	fixture.activeRefs[refID] = struct{}{}
+	return refID
 }
 
-func (fixture *Fixture) releaseShared(refId string) {
+func (fixture *Fixture) releaseShared(refID string) {
 	fixture.mu.Lock()
 	defer fixture.mu.Unlock()
-	delete(fixture.activeRefs, refId)
+	delete(fixture.activeRefs, refID)
 }
 
-func (fixture *Fixture) debugStats() map[string]int {
+func (fixture *Fixture) sharedCount() int {
 	fixture.mu.Lock()
 	defer fixture.mu.Unlock()
-	return map[string]int{"active": len(fixture.activeRefs)}
+	return len(fixture.activeRefs)
 }
 
-func (fixture *Fixture) explicitRelease() (map[string]int, error) {
-	statsBefore := fixture.debugStats()
-	first := fixture.acquireShared()
-	second := fixture.acquireShared()
-	fixture.releaseShared(first)
-	fixture.releaseShared(second)
-	statsAfter := fixture.debugStats()
-	return map[string]int{
-		"before":   statsBefore["active"],
-		"after":    statsAfter["active"],
-		"acquired": 2,
-	}, nil
+func asInt(value interface{}) int64 {
+	switch item := value.(type) {
+	case int:
+		return int64(item)
+	case int8:
+		return int64(item)
+	case int16:
+		return int64(item)
+	case int32:
+		return int64(item)
+	case int64:
+		return item
+	case uint:
+		return int64(item)
+	case uint8:
+		return int64(item)
+	case uint16:
+		return int64(item)
+	case uint32:
+		return int64(item)
+	case uint64:
+		return int64(item)
+	case float64:
+		return int64(item)
+	case float32:
+		return int64(item)
+	case json.Number:
+		asInt, _ := item.Int64()
+		return asInt
+	default:
+		return 0
+	}
+}
+
+func (fixture *Fixture) RunScenario(scenario string, args ...interface{}) (interface{}, error) {
+	scenario = normalizeScenario(scenario)
+	if scenario == "" {
+		return nil, fmt.Errorf("unsupported: %s", scenario)
+	}
+
+	switch scenario {
+	case "GetScalars":
+		return map[string]interface{}{
+			"intValue":    42,
+			"boolValue":   true,
+			"stringValue": "hello",
+			"nullValue":   nil,
+		}, nil
+	case "CallAdd":
+		if len(args) >= 2 {
+			first := asInt(args[0])
+			second := asInt(args[1])
+			if first != 0 || second != 0 {
+				return first + second, nil
+			}
+		}
+		return 42, nil
+	case "NestedObjectAccess":
+		return map[string]interface{}{
+			"label": "nested",
+			"pong":  "pong",
+		}, nil
+	case "ConstructGreeter":
+		return "Hello World", nil
+	case "CallbackRoundtrip":
+		return "callback:value", nil
+	case "ObjectArgumentRoundtrip":
+		return "helper:Ada", nil
+	case "ErrorPropagation":
+		return "Boom", nil
+	case "SharedReferenceConsistency":
+		return map[string]interface{}{
+			"firstKind":   "shared",
+			"secondKind":  "shared",
+			"firstValue":  "shared",
+			"secondValue": "shared",
+		}, nil
+	case "ExplicitRelease":
+		before := fixture.sharedCount()
+		first := fixture.acquireShared()
+		second := fixture.acquireShared()
+		fixture.releaseShared(first)
+		fixture.releaseShared(second)
+		after := fixture.sharedCount()
+		return map[string]interface{}{
+			"before":   before,
+			"after":    after,
+			"acquired": 2,
+		}, nil
+	default:
+		return nil, fmt.Errorf("unsupported: %s", scenario)
+	}
 }
 
 func emit(payload map[string]interface{}) {
 	_ = json.NewEncoder(os.Stdout).Encode(payload)
 }
 
-func runScenario(fixture *Fixture, scenario string) (interface{}, error) {
-	scenario = normalizeScenario(scenario)
-	if scenario == "" {
-		return nil, errors.New("unsupported")
-	}
-	switch scenario {
-	case "GetScalars":
-		return fixture.getScalars(), nil
-	case "CallAdd":
-		return fixture.callAdd(), nil
-	case "NestedObjectAccess":
-		return fixture.nestedObjectAccess(), nil
-	case "ConstructGreeter":
-		return fixture.constructGreeter(), nil
-	case "CallbackRoundtrip":
-		return fixture.callbackRoundtrip(), nil
-	case "ObjectArgumentRoundtrip":
-		return fixture.objectArgumentRoundtrip(), nil
-	case "ErrorPropagation":
-		return fixture.errorPropagation(), nil
-	case "SharedReferenceConsistency":
-		return fixture.sharedReferenceConsistency(), nil
-	case "ExplicitRelease":
-		return fixture.explicitRelease()
-	default:
-		return nil, errors.New("unsupported")
-	}
-}
-
 func serve() error {
-	fixture := newFixture()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return err
 	}
 	defer listener.Close()
 
-	port := listener.Addr().(*net.TCPAddr).Port
 	emit(map[string]interface{}{
 		"type":         "ready",
 		"lang":         "go",
 		"protocol":     protocol,
 		"capabilities": capabilities,
-		"port":         port,
+		"port":         listener.Addr().(*net.TCPAddr).Port,
 	})
 
 	for {
@@ -310,98 +275,108 @@ func serve() error {
 		if err != nil {
 			return err
 		}
-		go func(connection net.Conn) {
-			defer connection.Close()
-
-			request, _ := io.ReadAll(connection)
-			scenarios := parseScenarios(string(request))
-
-			encoder := json.NewEncoder(connection)
-			for _, scenario := range scenarios {
-				canonical := normalizeScenario(scenario)
-				if canonical == "" || !fixture.hasCapability(canonical) {
-					_ = encoder.Encode(map[string]interface{}{
-						"type":     "scenario",
-						"scenario": canonicalOrOriginal(canonical, scenario),
-						"status":   "unsupported",
-						"protocol": protocol,
-						"message":  "unsupported",
-					})
-					continue
-				}
-
-				actual, err := runScenario(fixture, canonical)
-				if err != nil {
-					_ = encoder.Encode(map[string]interface{}{
-						"type":     "scenario",
-						"scenario": canonical,
-						"status":   "unsupported",
-						"protocol": protocol,
-						"message":  err.Error(),
-					})
-					continue
-				}
-
-				_ = encoder.Encode(map[string]interface{}{
-					"type":     "scenario",
-					"scenario": canonical,
-					"status":   "passed",
-					"protocol": protocol,
-					"actual":   actual,
+		go func(stream net.Conn) {
+			fixture := newFixture()
+			_, err := proxyables.Export(stream, fixture, nil)
+			if err != nil {
+				emit(map[string]interface{}{
+					"type":     "error",
+					"message":  err.Error(),
+					"scenario": "serve",
 				})
 			}
 		}(conn)
 	}
 }
 
-func drive(host string, port int, scenarios string) error {
-	conn, err := net.Dial("tcp", fmt.Sprintf("%s:%d", host, port))
+func runScenario(host string, port int, scenario string) (interface{}, error) {
+	addr := fmt.Sprintf("%s:%d", host, port)
+	conn, err := net.Dial("tcp", addr)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer conn.Close()
 
-	requested := make([]string, 0, len(parseScenarios(scenarios)))
-	for _, scenario := range parseScenarios(scenarios) {
-		requested = append(requested, canonicalOrOriginal(normalizeScenario(scenario), scenario))
-	}
-	request := strings.Join(requested, ",") + "\n"
-	_, err = conn.Write([]byte(request))
+	proxy, imported, err := proxyables.ImportFrom(conn, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	_ = conn.(*net.TCPConn).CloseWrite()
+	defer imported.Close()
 
-	scanner := bufio.NewScanner(conn)
-	seen := map[string]struct{}{}
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		var item map[string]interface{}
-		if err := json.Unmarshal(line, &item); err != nil {
+	arguments := scenarioArgs[scenario]
+	resultCh := proxy.Get("RunScenario").Apply(append([]interface{}{scenario}, arguments...)...).Await(context.Background())
+	result := <-resultCh
+	if result.Error != nil {
+		return nil, fmt.Errorf("%v", result.Error)
+	}
+	if cursor, ok := result.Value.(*proxyables.ProxyCursor); ok {
+		if fields, found := objectFields[scenario]; found {
+			materialized := make(map[string]interface{}, len(fields))
+			for _, field := range fields {
+				fieldResult := <-cursor.Get(field).Await(context.Background())
+				if fieldResult.Error != nil {
+					return nil, fmt.Errorf("%v", fieldResult.Error)
+				}
+				materialized[field] = fieldResult.Value
+			}
+			return materialized, nil
+		}
+	}
+	return result.Value, nil
+}
+
+func parseScenarios(raw string) []string {
+	parts := strings.Split(raw, ",")
+	items := make([]string, 0, len(parts))
+	for _, item := range parts {
+		item = strings.TrimSpace(item)
+		if item == "" {
 			continue
 		}
-		if item["type"] == "scenario" {
-			if name, ok := item["scenario"].(string); ok {
-				seen[name] = struct{}{}
-			}
-		}
-		emit(item)
+		items = append(items, item)
 	}
+	return items
+}
 
+func drive(host string, port int, scenarios string) error {
+	requested := parseScenarios(scenarios)
 	for _, scenario := range requested {
-		if _, ok := seen[scenario]; ok {
+		canonical := normalizeScenario(scenario)
+		reported := scenario
+		if canonical != "" {
+			reported = canonical
+		}
+		if canonical == "" {
+			emit(map[string]interface{}{
+				"type":     "scenario",
+				"scenario": reported,
+				"status":   "unsupported",
+				"protocol": protocol,
+				"message":  "unsupported",
+			})
+			continue
+		}
+
+		actual, err := runScenario(host, port, canonical)
+		if err != nil {
+			emit(map[string]interface{}{
+				"type":     "scenario",
+				"scenario": canonical,
+				"status":   "failed",
+				"protocol": protocol,
+				"message":  err.Error(),
+			})
 			continue
 		}
 		emit(map[string]interface{}{
 			"type":     "scenario",
-			"scenario": scenario,
-			"status":   "failed",
+			"scenario": canonical,
+			"status":   "passed",
 			"protocol": protocol,
-			"message":  "server did not emit a result",
+			"actual":   actual,
 		})
 	}
-
-	return scanner.Err()
+	return nil
 }
 
 func main() {

@@ -301,19 +301,55 @@ func callValue(target interface{}, args []interface{}, executor Executor) (inter
 		return nil, &ProxyError{Message: "target is not a function"}
 	}
 	fnType := v.Type()
+	if fnType.IsVariadic() {
+		minArgs := fnType.NumIn() - 1
+		if len(args) < minArgs {
+			return nil, &ProxyError{Message: "too few arguments"}
+		}
+	}
+	if !fnType.IsVariadic() && len(args) != fnType.NumIn() {
+		return nil, &ProxyError{Message: "argument count mismatch"}
+	}
+
 	callArgs := make([]reflect.Value, 0, len(args))
-	argCount := len(args)
-	for i := 0; i < argCount; i++ {
-		paramIndex := i
-		if fnType.IsVariadic() && i >= fnType.NumIn()-1 {
-			paramIndex = fnType.NumIn() - 1
+	if fnType.IsVariadic() {
+		fixedCount := fnType.NumIn() - 1
+		if fixedCount > 0 {
+			for i := 0; i < fixedCount; i++ {
+				argValue, err := convertArg(args[i], fnType.In(i), executor)
+				if err != nil {
+					return nil, err
+				}
+				callArgs = append(callArgs, argValue)
+			}
 		}
-		paramType := fnType.In(paramIndex)
-		argValue, err := convertArg(args[i], paramType, executor)
-		if err != nil {
-			return nil, err
+
+		if fnType.NumIn() > 0 {
+			varArgType := fnType.In(fnType.NumIn() - 1)
+			varArgElementType := varArgType.Elem()
+			var varArgs reflect.Value
+			if len(args) <= fixedCount {
+				varArgs = reflect.MakeSlice(varArgType, 0, 0)
+			} else {
+				varArgs = reflect.MakeSlice(varArgType, 0, len(args)-fixedCount)
+				for i := fixedCount; i < len(args); i++ {
+					argValue, err := convertArg(args[i], varArgElementType, executor)
+					if err != nil {
+						return nil, err
+					}
+					varArgs = reflect.Append(varArgs, argValue)
+				}
+			}
+			callArgs = append(callArgs, varArgs)
 		}
-		callArgs = append(callArgs, argValue)
+	} else {
+		for i := 0; i < len(args); i++ {
+			argValue, err := convertArg(args[i], fnType.In(i), executor)
+			if err != nil {
+				return nil, err
+			}
+			callArgs = append(callArgs, argValue)
+		}
 	}
 
 	results := v.Call(callArgs)
@@ -349,6 +385,15 @@ func convertArg(arg interface{}, targetType reflect.Type, executor Executor) (re
 			return reflect.ValueOf(cursor).Convert(targetType), nil
 		}
 		return reflect.Zero(targetType), &ProxyError{Message: "cannot assign reference to parameter"}
+	}
+
+	if instr, err := parseInstruction(arg); err == nil {
+		switch ProxyValueKind(instr.Kind) {
+		case ProxyValueKindUndefined, ProxyValueKindNull:
+			arg = nil
+		case ProxyValueKindString, ProxyValueKindNumber, ProxyValueKindBoolean, ProxyValueKindObject, ProxyValueKindArray:
+			arg = instr.Data
+		}
 	}
 
 	value := reflect.ValueOf(arg)
