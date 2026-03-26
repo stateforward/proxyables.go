@@ -28,7 +28,10 @@ func NewExportedProxyable(conn net.Conn, root interface{}, opts *ExportOptions) 
 		return nil, err
 	}
 
-	registry := NewObjectRegistry()
+	registry := opts.Registry
+	if registry == nil {
+		registry = NewObjectRegistry()
+	}
 	exported := &ExportedProxyable{
 		session:    session,
 		root:       root,
@@ -105,24 +108,25 @@ func (e *ExportedProxyable) handleInstruction(instr ProxyInstruction) ProxyInstr
 }
 
 func (e *ExportedProxyable) evaluateInstructions(instructions []ProxyInstruction) (ProxyInstruction, *ProxyError) {
-	stack := make([]ProxyInstruction, 0, len(instructions))
+	stack := make([]interface{}, 0, len(instructions))
 	for _, instr := range instructions {
 		if ProxyValueKind(instr.Kind) == ProxyValueKindReference {
-			stack = append(stack, instr)
+			refID, ok := instr.Data.(string)
+			if !ok {
+				return ProxyInstruction{}, &ProxyError{Message: "invalid reference id"}
+			}
+			value, found := e.registry.Get(refID)
+			if !found {
+				return ProxyInstruction{}, &ProxyError{Message: "target not found"}
+			}
+			stack = append(stack, value)
 			continue
 		}
 
 		var target interface{} = e.root
 		if len(stack) > 0 {
-			last := stack[len(stack)-1]
-			if ProxyValueKind(last.Kind) == ProxyValueKindReference {
-				stack = stack[:len(stack)-1]
-				if refID, ok := last.Data.(string); ok {
-					if value, found := e.registry.Get(refID); found {
-						target = value
-					}
-				}
-			}
+			target = stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
 		}
 
 		result, err := e.applyInstruction(target, instr)
@@ -135,52 +139,52 @@ func (e *ExportedProxyable) evaluateInstructions(instructions []ProxyInstruction
 	if len(stack) == 0 {
 		return ProxyInstruction{}, &ProxyError{Message: "no result"}
 	}
-	return stack[0], nil
+	return e.createValue(stack[len(stack)-1]), nil
 }
 
-func (e *ExportedProxyable) applyInstruction(target interface{}, instr ProxyInstruction) (ProxyInstruction, *ProxyError) {
+func (e *ExportedProxyable) applyInstruction(target interface{}, instr ProxyInstruction) (interface{}, *ProxyError) {
 	switch ProxyInstructionKind(instr.Kind) {
 	case ProxyInstructionKindGet:
 		key, err := parseGetKey(instr.Data)
 		if err != nil {
-			return ProxyInstruction{}, err
+			return nil, err
 		}
 		value, found, getErr := getProperty(target, key)
 		if getErr != nil {
-			return ProxyInstruction{}, getErr
+			return nil, getErr
 		}
 		if !found {
-			return createUndefinedValue(), nil
+			return nil, nil
 		}
-		return e.createValue(value), nil
+		return value, nil
 	case ProxyInstructionKindApply:
 		args, err := parseArgs(instr.Data)
 		if err != nil {
-			return ProxyInstruction{}, err
+			return nil, err
 		}
 		value, callErr := e.callTarget(target, args)
 		if callErr != nil {
-			return ProxyInstruction{}, callErr
+			return nil, callErr
 		}
-		return e.createValue(value), nil
+		return value, nil
 	case ProxyInstructionKindConstruct:
 		args, err := parseArgs(instr.Data)
 		if err != nil {
-			return ProxyInstruction{}, err
+			return nil, err
 		}
 		value, callErr := e.callTarget(target, args)
 		if callErr != nil {
-			return ProxyInstruction{}, callErr
+			return nil, callErr
 		}
-		return e.createValue(value), nil
+		return value, nil
 	case ProxyInstructionKindRelease:
 		refID, ok := parseReleaseID(instr.Data)
 		if ok {
 			e.registry.Delete(refID)
 		}
-		return createUndefinedValue(), nil
+		return nil, nil
 	default:
-		return ProxyInstruction{}, &ProxyError{Message: "unsupported instruction"}
+		return nil, &ProxyError{Message: "unsupported instruction"}
 	}
 }
 
@@ -206,4 +210,8 @@ func (e *ExportedProxyable) Execute(ctx context.Context, instructions []ProxyIns
 		return nil, err
 	}
 	return unwrapReturn(resp, e)
+}
+
+func (e *ExportedProxyable) RegistrySnapshot() ObjectRegistrySnapshot {
+	return e.registry.Snapshot()
 }

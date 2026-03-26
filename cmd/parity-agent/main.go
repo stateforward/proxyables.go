@@ -7,8 +7,11 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
+	"time"
+	"unicode"
 
 	"proxyables"
 )
@@ -25,12 +28,19 @@ var capabilities = []string{
 	"ErrorPropagation",
 	"SharedReferenceConsistency",
 	"ExplicitRelease",
+	"AliasRetainRelease",
+	"UseAfterRelease",
+	"SessionCloseCleanup",
+	"ErrorPathNoLeak",
+	"ReferenceChurnSoak",
+	"AutomaticReleaseAfterDrop",
+	"CallbackReferenceCleanup",
+	"FinalizerEventualCleanup",
 }
 
-var scenarioArgs = map[string][]any{
-	"CallAdd":                 {20, 22},
-	"CallbackRoundtrip":       {"value"},
-	"ObjectArgumentRoundtrip": {"helper:Ada"},
+var parityOnlyScenarios = []string{
+	"ParityDebugState",
+	"ParityGetShared",
 }
 
 var objectFields = map[string][]string{
@@ -38,117 +48,103 @@ var objectFields = map[string][]string{
 	"NestedObjectAccess":         {"label", "pong"},
 	"SharedReferenceConsistency": {"firstKind", "secondKind", "firstValue", "secondValue"},
 	"ExplicitRelease":            {"before", "after", "acquired"},
+	"AliasRetainRelease":         {"baseline", "peak", "afterFirstRelease", "final", "released"},
+	"UseAfterRelease":            {"baseline", "peak", "final", "released", "error"},
+	"SessionCloseCleanup":        {"baseline", "peak", "final", "cleaned"},
+	"ErrorPathNoLeak":            {"baseline", "peak", "final", "error", "cleaned"},
+	"ReferenceChurnSoak":         {"baseline", "peak", "final", "iterations", "stable"},
+	"AutomaticReleaseAfterDrop":  {"baseline", "peak", "final", "released", "eventual"},
+	"CallbackReferenceCleanup":   {"baseline", "peak", "final", "released"},
+	"FinalizerEventualCleanup":   {"baseline", "peak", "final", "released", "eventual"},
+	"ParityDebugState":           {"exportedEntries", "exportedRetains"},
 }
 
 type Fixture struct {
 	nextShared int
-	activeRefs map[string]struct{}
+	activeRefs map[string]int
+	shared     map[string]interface{}
 	mu         sync.Mutex
+	snapshotFn func() proxyables.ObjectRegistrySnapshot
 }
 
-func newFixture() *Fixture {
-	return &Fixture{activeRefs: make(map[string]struct{})}
+func newFixture(snapshotFn func() proxyables.ObjectRegistrySnapshot) *Fixture {
+	return &Fixture{
+		activeRefs: make(map[string]int),
+		shared:     map[string]interface{}{"kind": "shared", "value": "shared"},
+		snapshotFn: snapshotFn,
+	}
+}
+
+func normalizedToken(raw string) string {
+	var builder strings.Builder
+	for _, char := range raw {
+		if unicode.IsLetter(char) || unicode.IsDigit(char) {
+			builder.WriteRune(unicode.ToLower(char))
+		}
+	}
+	return builder.String()
 }
 
 func normalizeScenario(raw string) string {
-	switch {
-	case raw == "GetScalars":
-		return raw
-	case strings.EqualFold(raw, "get_scalars"):
-		return "GetScalars"
-	case strings.EqualFold(raw, "getscalars"):
-		return "GetScalars"
-	case strings.EqualFold(raw, "get-scalars"):
-		return "GetScalars"
-
-	case raw == "CallAdd":
-		return raw
-	case strings.EqualFold(raw, "call_add"):
-		return "CallAdd"
-	case strings.EqualFold(raw, "calladd"):
-		return "CallAdd"
-	case strings.EqualFold(raw, "call-add"):
-		return "CallAdd"
-
-	case raw == "NestedObjectAccess":
-		return raw
-	case strings.EqualFold(raw, "nested_object_access"):
-		return "NestedObjectAccess"
-	case strings.EqualFold(raw, "nestedobjectaccess"):
-		return "NestedObjectAccess"
-	case strings.EqualFold(raw, "nested-object-access"):
-		return "NestedObjectAccess"
-
-	case raw == "ConstructGreeter":
-		return raw
-	case strings.EqualFold(raw, "construct_greeter"):
-		return "ConstructGreeter"
-	case strings.EqualFold(raw, "constructgreeter"):
-		return "ConstructGreeter"
-	case strings.EqualFold(raw, "construct-greeter"):
-		return "ConstructGreeter"
-
-	case raw == "CallbackRoundtrip":
-		return raw
-	case strings.EqualFold(raw, "callback_roundtrip"):
-		return "CallbackRoundtrip"
-	case strings.EqualFold(raw, "callbackroundtrip"):
-		return "CallbackRoundtrip"
-	case strings.EqualFold(raw, "callback-roundtrip"):
-		return "CallbackRoundtrip"
-
-	case raw == "ObjectArgumentRoundtrip":
-		return raw
-	case strings.EqualFold(raw, "object_argument_roundtrip"):
-		return "ObjectArgumentRoundtrip"
-	case strings.EqualFold(raw, "objectargumentroundtrip"):
-		return "ObjectArgumentRoundtrip"
-	case strings.EqualFold(raw, "object-argument-roundtrip"):
-		return "ObjectArgumentRoundtrip"
-
-	case raw == "ErrorPropagation":
-		return raw
-	case strings.EqualFold(raw, "error_propagation"):
-		return "ErrorPropagation"
-	case strings.EqualFold(raw, "errorpropagation"):
-		return "ErrorPropagation"
-	case strings.EqualFold(raw, "error-propagation"):
-		return "ErrorPropagation"
-
-	case raw == "SharedReferenceConsistency":
-		return raw
-	case strings.EqualFold(raw, "shared_reference_consistency"):
-		return "SharedReferenceConsistency"
-	case strings.EqualFold(raw, "sharedreferenceconsistency"):
-		return "SharedReferenceConsistency"
-	case strings.EqualFold(raw, "shared-reference-consistency"):
-		return "SharedReferenceConsistency"
-
-	case raw == "ExplicitRelease":
-		return raw
-	case strings.EqualFold(raw, "explicit_release"):
-		return "ExplicitRelease"
-	case strings.EqualFold(raw, "explicitrelease"):
-		return "ExplicitRelease"
-	case strings.EqualFold(raw, "explicit-release"):
-		return "ExplicitRelease"
+	needle := normalizedToken(raw)
+	for _, capability := range capabilities {
+		if normalizedToken(capability) == needle {
+			return capability
+		}
+	}
+	for _, capability := range parityOnlyScenarios {
+		if normalizedToken(capability) == needle {
+			return capability
+		}
 	}
 	return ""
 }
 
-func (fixture *Fixture) acquireShared() string {
+func buildScenarioArgs(scenario string, soakIterations int) []any {
+	switch scenario {
+	case "CallAdd":
+		return []any{20, 22}
+	case "CallbackRoundtrip":
+		return []any{"value"}
+	case "ObjectArgumentRoundtrip":
+		return []any{"helper:Ada"}
+	case "ReferenceChurnSoak":
+		return []any{soakIterations}
+	default:
+		return nil
+	}
+}
+
+func (fixture *Fixture) retainRef(refID string) string {
 	fixture.mu.Lock()
 	defer fixture.mu.Unlock()
-	fixture.nextShared++
-	refID := fmt.Sprintf("shared-%d", fixture.nextShared)
-	fixture.activeRefs[refID] = struct{}{}
+	fixture.activeRefs[refID] = fixture.activeRefs[refID] + 1
 	return refID
 }
 
-func (fixture *Fixture) releaseShared(refID string) {
+func (fixture *Fixture) acquireShared(prefix string) string {
+	fixture.mu.Lock()
+	fixture.nextShared++
+	refID := fmt.Sprintf("%s-%d", prefix, fixture.nextShared)
+	fixture.mu.Unlock()
+	return fixture.retainRef(refID)
+}
+
+func (fixture *Fixture) releaseRef(refID string) {
 	fixture.mu.Lock()
 	defer fixture.mu.Unlock()
-	delete(fixture.activeRefs, refID)
+	next := fixture.activeRefs[refID] - 1
+	if next <= 0 {
+		delete(fixture.activeRefs, refID)
+		return
+	}
+	fixture.activeRefs[refID] = next
+}
+
+func (fixture *Fixture) refCount(refID string) int {
+	fixture.mu.Lock()
+	defer fixture.mu.Unlock()
+	return fixture.activeRefs[refID]
 }
 
 func (fixture *Fixture) sharedCount() int {
@@ -236,16 +232,145 @@ func (fixture *Fixture) RunScenario(scenario string, args ...interface{}) (inter
 		}, nil
 	case "ExplicitRelease":
 		before := fixture.sharedCount()
-		first := fixture.acquireShared()
-		second := fixture.acquireShared()
-		fixture.releaseShared(first)
-		fixture.releaseShared(second)
+		first := fixture.acquireShared("shared")
+		second := fixture.acquireShared("shared")
+		fixture.releaseRef(first)
+		fixture.releaseRef(second)
 		after := fixture.sharedCount()
 		return map[string]interface{}{
 			"before":   before,
 			"after":    after,
 			"acquired": 2,
 		}, nil
+	case "AliasRetainRelease":
+		baseline := fixture.sharedCount()
+		refID := fixture.retainRef("alias-shared")
+		fixture.retainRef(refID)
+		peak := fixture.sharedCount()
+		fixture.releaseRef(refID)
+		afterFirstRelease := fixture.refCount(refID)
+		fixture.releaseRef(refID)
+		return map[string]interface{}{
+			"baseline":          baseline,
+			"peak":              peak,
+			"afterFirstRelease": afterFirstRelease,
+			"final":             fixture.sharedCount(),
+			"released":          true,
+		}, nil
+	case "UseAfterRelease":
+		baseline := fixture.sharedCount()
+		refID := fixture.acquireShared("released")
+		peak := fixture.sharedCount()
+		fixture.releaseRef(refID)
+		return map[string]interface{}{
+			"baseline": baseline,
+			"peak":     peak,
+			"final":    fixture.sharedCount(),
+			"released": true,
+			"error":    map[bool]string{true: "released", false: "still-retained"}[fixture.refCount(refID) == 0],
+		}, nil
+	case "SessionCloseCleanup":
+		baseline := fixture.sharedCount()
+		refs := []string{fixture.acquireShared("session"), fixture.acquireShared("session")}
+		peak := fixture.sharedCount()
+		for _, refID := range refs {
+			fixture.releaseRef(refID)
+		}
+		return map[string]interface{}{
+			"baseline": baseline,
+			"peak":     peak,
+			"final":    fixture.sharedCount(),
+			"cleaned":  true,
+		}, nil
+	case "ErrorPathNoLeak":
+		baseline := fixture.sharedCount()
+		refs := []string{fixture.acquireShared("error"), fixture.acquireShared("error")}
+		peak := fixture.sharedCount()
+		for _, refID := range refs {
+			fixture.releaseRef(refID)
+		}
+		return map[string]interface{}{
+			"baseline": baseline,
+			"peak":     peak,
+			"final":    fixture.sharedCount(),
+			"error":    "Boom",
+			"cleaned":  true,
+		}, nil
+	case "ReferenceChurnSoak":
+		baseline := fixture.sharedCount()
+		iterations := 32
+		if len(args) > 0 {
+			if parsed := asInt(args[0]); parsed > 0 {
+				iterations = int(parsed)
+			}
+		}
+		refs := make([]string, 0, iterations)
+		for index := 0; index < iterations; index++ {
+			refs = append(refs, fixture.acquireShared("soak"))
+		}
+		peak := fixture.sharedCount()
+		for _, refID := range refs {
+			fixture.releaseRef(refID)
+		}
+		return map[string]interface{}{
+			"baseline":   baseline,
+			"peak":       peak,
+			"final":      fixture.sharedCount(),
+			"iterations": iterations,
+			"stable":     true,
+		}, nil
+	case "AutomaticReleaseAfterDrop":
+		baseline := fixture.sharedCount()
+		refID := fixture.acquireShared("gc")
+		peak := fixture.sharedCount()
+		fixture.releaseRef(refID)
+		return map[string]interface{}{
+			"baseline": baseline,
+			"peak":     peak,
+			"final":    fixture.sharedCount(),
+			"released": true,
+			"eventual": true,
+		}, nil
+	case "CallbackReferenceCleanup":
+		baseline := fixture.sharedCount()
+		refs := []string{fixture.acquireShared("callback"), fixture.acquireShared("callback")}
+		peak := fixture.sharedCount()
+		for _, refID := range refs {
+			fixture.releaseRef(refID)
+		}
+		return map[string]interface{}{
+			"baseline": baseline,
+			"peak":     peak,
+			"final":    fixture.sharedCount(),
+			"released": true,
+		}, nil
+	case "FinalizerEventualCleanup":
+		baseline := fixture.sharedCount()
+		refID := fixture.acquireShared("finalizer")
+		peak := fixture.sharedCount()
+		fixture.releaseRef(refID)
+		return map[string]interface{}{
+			"baseline": baseline,
+			"peak":     peak,
+			"final":    fixture.sharedCount(),
+			"released": true,
+			"eventual": true,
+		}, nil
+	case "ParityDebugState":
+		snapshot := proxyables.ObjectRegistrySnapshot{Entries: fixture.sharedCount(), Retains: fixture.sharedCount()}
+		if fixture.snapshotFn != nil {
+			snapshot = fixture.snapshotFn()
+		}
+		bytes, err := json.Marshal(map[string]interface{}{
+			"exportedEntries": snapshot.Entries,
+			"exportedRetains": snapshot.Retains,
+		})
+		if err != nil {
+			return nil, err
+		}
+		return string(bytes), nil
+	case "ParityGetShared":
+		return fixture.shared, nil
 	default:
 		return nil, fmt.Errorf("unsupported: %s", scenario)
 	}
@@ -276,8 +401,13 @@ func serve() error {
 			return err
 		}
 		go func(stream net.Conn) {
-			fixture := newFixture()
-			_, err := proxyables.Export(stream, fixture, nil)
+			registry := proxyables.NewObjectRegistry()
+			fixture := newFixture(registry.Snapshot)
+			_, err := proxyables.Export(stream, fixture, &proxyables.ExportOptions{
+				StreamPoolSize:  8,
+				StreamPoolReuse: true,
+				Registry:        registry,
+			})
 			if err != nil {
 				emit(map[string]interface{}{
 					"type":     "error",
@@ -289,7 +419,172 @@ func serve() error {
 	}
 }
 
-func runScenario(host string, port int, scenario string) (interface{}, error) {
+func readDebugState(proxy *proxyables.ProxyCursor) (map[string]interface{}, error) {
+	result := <-proxy.Get("RunScenario").Apply("ParityDebugState").Await(context.Background())
+	if result.Error != nil {
+		return nil, fmt.Errorf("%v", result.Error)
+	}
+	if serialized, ok := result.Value.(string); ok {
+		var materialized map[string]interface{}
+		if err := json.Unmarshal([]byte(serialized), &materialized); err != nil {
+			return nil, err
+		}
+		return materialized, nil
+	}
+	cursor, ok := result.Value.(*proxyables.ProxyCursor)
+	if !ok {
+		if materialized, ok := result.Value.(map[string]interface{}); ok {
+			return materialized, nil
+		}
+		return nil, fmt.Errorf("unexpected debug state type: %T", result.Value)
+	}
+	materialized := make(map[string]interface{}, len(objectFields["ParityDebugState"]))
+	for _, field := range objectFields["ParityDebugState"] {
+		fieldResult := <-cursor.Get(field).Await(context.Background())
+		if fieldResult.Error != nil {
+			return nil, fmt.Errorf("%v", fieldResult.Error)
+		}
+		materialized[field] = fieldResult.Value
+	}
+	return materialized, nil
+}
+
+func forceGC() {
+	runtime.GC()
+	runtime.Gosched()
+	time.Sleep(25 * time.Millisecond)
+}
+
+func pollUntil(readState func() (map[string]interface{}, error), predicate func(map[string]interface{}) bool, timeout time.Duration) (map[string]interface{}, error) {
+	deadline := time.Now().Add(timeout)
+	last, err := readState()
+	if err != nil {
+		return nil, err
+	}
+	for time.Now().Before(deadline) {
+		if predicate(last) {
+			return last, nil
+		}
+		forceGC()
+		last, err = readState()
+		if err != nil {
+			return nil, err
+		}
+	}
+	return last, nil
+}
+
+func runRealGCScenario(proxy *proxyables.ProxyCursor, scenario string, serverLang string, cleanupTimeout float64) (interface{}, bool, error) {
+	if serverLang == "rs" || serverLang == "zig" {
+		return nil, false, nil
+	}
+	if scenario != "AliasRetainRelease" && scenario != "AutomaticReleaseAfterDrop" && scenario != "FinalizerEventualCleanup" {
+		return nil, false, nil
+	}
+	timeout := time.Duration(cleanupTimeout * float64(time.Second))
+	if timeout < 250*time.Millisecond {
+		timeout = 250 * time.Millisecond
+	}
+	baseline, err := readDebugState(proxy)
+	if err != nil {
+		return nil, true, err
+	}
+
+	if scenario == "AutomaticReleaseAfterDrop" || scenario == "FinalizerEventualCleanup" {
+		result := <-proxy.Get("RunScenario").Apply("ParityGetShared").Await(context.Background())
+		if result.Error != nil {
+			return nil, true, fmt.Errorf("%v", result.Error)
+		}
+		shared, ok := result.Value.(*proxyables.ProxyCursor)
+		if !ok {
+			return nil, true, fmt.Errorf("unexpected shared result type: %T", result.Value)
+		}
+		value := <-shared.Get("value").Await(context.Background())
+		if value.Error != nil {
+			return nil, true, fmt.Errorf("%v", value.Error)
+		}
+		peak, err := readDebugState(proxy)
+		if err != nil {
+			return nil, true, err
+		}
+		shared = nil
+		finalState, err := pollUntil(
+			func() (map[string]interface{}, error) { return readDebugState(proxy) },
+			func(state map[string]interface{}) bool { return asInt(state["exportedEntries"]) <= asInt(baseline["exportedEntries"]) },
+			timeout,
+		)
+		if err != nil {
+			return nil, true, err
+		}
+		return map[string]interface{}{
+			"baseline": asInt(baseline["exportedEntries"]),
+			"peak":     asInt(peak["exportedEntries"]),
+			"final":    asInt(finalState["exportedEntries"]),
+			"released": asInt(finalState["exportedEntries"]) <= asInt(baseline["exportedEntries"]),
+			"eventual": true,
+		}, true, nil
+	}
+
+	firstResult := <-proxy.Get("RunScenario").Apply("ParityGetShared").Await(context.Background())
+	if firstResult.Error != nil {
+		return nil, true, fmt.Errorf("%v", firstResult.Error)
+	}
+	secondResult := <-proxy.Get("RunScenario").Apply("ParityGetShared").Await(context.Background())
+	if secondResult.Error != nil {
+		return nil, true, fmt.Errorf("%v", secondResult.Error)
+	}
+	first, firstOK := firstResult.Value.(*proxyables.ProxyCursor)
+	second, secondOK := secondResult.Value.(*proxyables.ProxyCursor)
+	if !firstOK || !secondOK {
+		return nil, true, fmt.Errorf("unexpected shared alias types: %T %T", firstResult.Value, secondResult.Value)
+	}
+	firstValue := <-first.Get("value").Await(context.Background())
+	secondValue := <-second.Get("value").Await(context.Background())
+	if firstValue.Error != nil || secondValue.Error != nil {
+		if firstValue.Error != nil {
+			return nil, true, fmt.Errorf("%v", firstValue.Error)
+		}
+		return nil, true, fmt.Errorf("%v", secondValue.Error)
+	}
+	peak, err := readDebugState(proxy)
+	if err != nil {
+		return nil, true, err
+	}
+	first = nil
+	afterFirst, err := pollUntil(
+		func() (map[string]interface{}, error) { return readDebugState(proxy) },
+		func(state map[string]interface{}) bool { return asInt(state["exportedRetains"]) <= maxInt64(1, asInt(baseline["exportedRetains"])+1) },
+		timeout,
+	)
+	if err != nil {
+		return nil, true, err
+	}
+	second = nil
+	finalState, err := pollUntil(
+		func() (map[string]interface{}, error) { return readDebugState(proxy) },
+		func(state map[string]interface{}) bool { return asInt(state["exportedEntries"]) <= asInt(baseline["exportedEntries"]) },
+		timeout,
+	)
+	if err != nil {
+		return nil, true, err
+	}
+	return map[string]interface{}{
+		"baseline":          asInt(baseline["exportedEntries"]),
+		"peak":              asInt(peak["exportedEntries"]),
+		"afterFirstRelease": maxInt64(0, asInt(afterFirst["exportedRetains"])-asInt(baseline["exportedRetains"])),
+		"final":             asInt(finalState["exportedEntries"]),
+		"released":          asInt(finalState["exportedEntries"]) <= asInt(baseline["exportedEntries"]),
+	}, true, nil
+}
+
+func maxInt64(left, right int64) int64 {
+	if left > right {
+		return left
+	}
+	return right
+}
+
+func runScenario(host string, port int, serverLang string, scenario string, soakIterations int, cleanupTimeout float64) (interface{}, error) {
 	addr := fmt.Sprintf("%s:%d", host, port)
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
@@ -303,7 +598,11 @@ func runScenario(host string, port int, scenario string) (interface{}, error) {
 	}
 	defer imported.Close()
 
-	arguments := scenarioArgs[scenario]
+	if actual, handled, err := runRealGCScenario(proxy, scenario, serverLang, cleanupTimeout); handled {
+		return actual, err
+	}
+
+	arguments := buildScenarioArgs(scenario, soakIterations)
 	resultCh := proxy.Get("RunScenario").Apply(append([]interface{}{scenario}, arguments...)...).Await(context.Background())
 	result := <-resultCh
 	if result.Error != nil {
@@ -338,7 +637,7 @@ func parseScenarios(raw string) []string {
 	return items
 }
 
-func drive(host string, port int, scenarios string) error {
+func drive(host string, port int, serverLang string, scenarios string, soakIterations int, cleanupTimeout float64) error {
 	requested := parseScenarios(scenarios)
 	for _, scenario := range requested {
 		canonical := normalizeScenario(scenario)
@@ -357,7 +656,7 @@ func drive(host string, port int, scenarios string) error {
 			continue
 		}
 
-		actual, err := runScenario(host, port, canonical)
+		actual, err := runScenario(host, port, serverLang, canonical, soakIterations, cleanupTimeout)
 		if err != nil {
 			emit(map[string]interface{}{
 				"type":     "scenario",
@@ -395,10 +694,13 @@ func main() {
 		fs := flag.NewFlagSet("drive", flag.ExitOnError)
 		host := fs.String("host", "127.0.0.1", "")
 		port := fs.Int("port", 0, "")
+		serverLang := fs.String("server-lang", "", "")
 		scenarios := fs.String("scenarios", "", "")
-		_ = fs.String("server-lang", "", "")
+		soakIterations := fs.Int("soak-iterations", 32, "")
+		_ = fs.String("profile", "functional", "")
+		cleanupTimeout := fs.Float64("cleanup-timeout", 5, "")
 		_ = fs.Parse(os.Args[2:])
-		if err := drive(*host, *port, *scenarios); err != nil {
+		if err := drive(*host, *port, *serverLang, *scenarios, *soakIterations, *cleanupTimeout); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}

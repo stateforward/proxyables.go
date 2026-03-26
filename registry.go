@@ -5,6 +5,11 @@ import (
 	"sync"
 )
 
+type ObjectRegistrySnapshot struct {
+	Entries int
+	Retains int
+}
+
 // ObjectRegistry tracks objects and their reference counts.
 type ObjectRegistry struct {
 	mu      sync.Mutex
@@ -88,4 +93,17 @@ func (r *ObjectRegistry) Size() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return len(r.objects)
+}
+
+func (r *ObjectRegistry) Snapshot() ObjectRegistrySnapshot {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	retains := 0
+	for _, count := range r.counts {
+		retains += count
+	}
+	return ObjectRegistrySnapshot{
+		Entries: len(r.objects),
+		Retains: retains,
+	}
 }

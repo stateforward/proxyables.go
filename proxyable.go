@@ -13,12 +13,14 @@ const (
 type ExportOptions struct {
 	StreamPoolSize  int
 	StreamPoolReuse bool
+	Registry        *ObjectRegistry
 }
 
 // ImportOptions configures imported proxyables.
 type ImportOptions struct {
 	StreamPoolSize  int
 	StreamPoolReuse bool
+	Registry        *ObjectRegistry
 }
 
 // Export creates an exported proxyable bound to a yamux server session.

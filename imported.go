@@ -27,9 +27,12 @@ func NewImportedProxyable(conn net.Conn, opts *ImportOptions) (*ImportedProxyabl
 	}
 	imported := &ImportedProxyable{
 		session:    session,
-		registry:   NewObjectRegistry(),
+		registry:   opts.Registry,
 		streamPool: NewStreamPool(session, opts.StreamPoolSize, opts.StreamPoolReuse),
 		closed:     make(chan struct{}),
+	}
+	if imported.registry == nil {
+		imported.registry = NewObjectRegistry()
 	}
 	go imported.acceptLoop()
 	return imported, nil
@@ -221,4 +224,8 @@ func (i *ImportedProxyable) releaseReference(refID string) {
 	_ = enc.Encode(CreateReleaseInstruction(refID))
 	var resp ProxyInstruction
 	_ = dec.Decode(&resp)
+}
+
+func (i *ImportedProxyable) RegistrySnapshot() ObjectRegistrySnapshot {
+	return i.registry.Snapshot()
 }
