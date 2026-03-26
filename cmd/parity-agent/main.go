@@ -16,15 +16,15 @@ import (
 const protocol = "parity-json-v1"
 
 var capabilities = []string{
-	"get_scalars",
-	"call_add",
-	"nested_object_access",
-	"construct_greeter",
-	"callback_roundtrip",
-	"object_argument_roundtrip",
-	"error_propagation",
-	"shared_reference_consistency",
-	"explicit_release",
+	"GetScalars",
+	"CallAdd",
+	"NestedObjectAccess",
+	"ConstructGreeter",
+	"CallbackRoundtrip",
+	"ObjectArgumentRoundtrip",
+	"ErrorPropagation",
+	"SharedReferenceConsistency",
+	"ExplicitRelease",
 }
 
 type Fixture struct {
@@ -66,9 +66,107 @@ func parseScenarios(raw string) []string {
 	return items
 }
 
+func normalizeScenario(raw string) string {
+	switch {
+	case raw == "GetScalars":
+		return raw
+	case strings.EqualFold(raw, "get_scalars"):
+		return "GetScalars"
+	case strings.EqualFold(raw, "getscalars"):
+		return "GetScalars"
+	case strings.EqualFold(raw, "get-scalars"):
+		return "GetScalars"
+
+	case raw == "CallAdd":
+		return raw
+	case strings.EqualFold(raw, "call_add"):
+		return "CallAdd"
+	case strings.EqualFold(raw, "calladd"):
+		return "CallAdd"
+	case strings.EqualFold(raw, "call-add"):
+		return "CallAdd"
+
+	case raw == "NestedObjectAccess":
+		return raw
+	case strings.EqualFold(raw, "nested_object_access"):
+		return "NestedObjectAccess"
+	case strings.EqualFold(raw, "nestedobjectaccess"):
+		return "NestedObjectAccess"
+	case strings.EqualFold(raw, "nested-object-access"):
+		return "NestedObjectAccess"
+
+	case raw == "ConstructGreeter":
+		return raw
+	case strings.EqualFold(raw, "construct_greeter"):
+		return "ConstructGreeter"
+	case strings.EqualFold(raw, "constructgreeter"):
+		return "ConstructGreeter"
+	case strings.EqualFold(raw, "construct-greeter"):
+		return "ConstructGreeter"
+
+	case raw == "CallbackRoundtrip":
+		return raw
+	case strings.EqualFold(raw, "callback_roundtrip"):
+		return "CallbackRoundtrip"
+	case strings.EqualFold(raw, "callbackroundtrip"):
+		return "CallbackRoundtrip"
+	case strings.EqualFold(raw, "callback-roundtrip"):
+		return "CallbackRoundtrip"
+
+	case raw == "ObjectArgumentRoundtrip":
+		return raw
+	case strings.EqualFold(raw, "object_argument_roundtrip"):
+		return "ObjectArgumentRoundtrip"
+	case strings.EqualFold(raw, "objectargumentroundtrip"):
+		return "ObjectArgumentRoundtrip"
+	case strings.EqualFold(raw, "object-argument-roundtrip"):
+		return "ObjectArgumentRoundtrip"
+
+	case raw == "ErrorPropagation":
+		return raw
+	case strings.EqualFold(raw, "error_propagation"):
+		return "ErrorPropagation"
+	case strings.EqualFold(raw, "errorpropagation"):
+		return "ErrorPropagation"
+	case strings.EqualFold(raw, "error-propagation"):
+		return "ErrorPropagation"
+
+	case raw == "SharedReferenceConsistency":
+		return raw
+	case strings.EqualFold(raw, "shared_reference_consistency"):
+		return "SharedReferenceConsistency"
+	case strings.EqualFold(raw, "sharedreferenceconsistency"):
+		return "SharedReferenceConsistency"
+	case strings.EqualFold(raw, "shared-reference-consistency"):
+		return "SharedReferenceConsistency"
+
+	case raw == "ExplicitRelease":
+		return raw
+	case strings.EqualFold(raw, "explicit_release"):
+		return "ExplicitRelease"
+	case strings.EqualFold(raw, "explicitrelease"):
+		return "ExplicitRelease"
+	case strings.EqualFold(raw, "explicit-release"):
+		return "ExplicitRelease"
+	default:
+		return ""
+	}
+}
+
+func canonicalOrOriginal(canonical string, original string) string {
+	if canonical != "" {
+		return canonical
+	}
+	return original
+}
+
 func (fixture *Fixture) hasCapability(name string) bool {
+	canonical := normalizeScenario(name)
+	if canonical == "" {
+		return false
+	}
 	for _, item := range capabilities {
-		if item == name {
+		if item == canonical {
 			return true
 		}
 	}
@@ -114,9 +212,9 @@ func (fixture *Fixture) errorPropagation() string {
 func (fixture *Fixture) sharedReferenceConsistency() map[string]interface{} {
 	shared := map[string]interface{}{"kind": "shared", "value": "shared"}
 	return map[string]interface{}{
-		"firstKind":  shared["kind"],
-		"secondKind": shared["kind"],
-		"firstValue": shared["value"],
+		"firstKind":   shared["kind"],
+		"secondKind":  shared["kind"],
+		"firstValue":  shared["value"],
 		"secondValue": shared["value"],
 	}
 }
@@ -151,8 +249,8 @@ func (fixture *Fixture) explicitRelease() (map[string]int, error) {
 	fixture.releaseShared(second)
 	statsAfter := fixture.debugStats()
 	return map[string]int{
-		"before":  statsBefore["active"],
-		"after":   statsAfter["active"],
+		"before":   statsBefore["active"],
+		"after":    statsAfter["active"],
 		"acquired": 2,
 	}, nil
 }
@@ -162,24 +260,28 @@ func emit(payload map[string]interface{}) {
 }
 
 func runScenario(fixture *Fixture, scenario string) (interface{}, error) {
+	scenario = normalizeScenario(scenario)
+	if scenario == "" {
+		return nil, errors.New("unsupported")
+	}
 	switch scenario {
-	case "get_scalars":
+	case "GetScalars":
 		return fixture.getScalars(), nil
-	case "call_add":
+	case "CallAdd":
 		return fixture.callAdd(), nil
-	case "nested_object_access":
+	case "NestedObjectAccess":
 		return fixture.nestedObjectAccess(), nil
-	case "construct_greeter":
+	case "ConstructGreeter":
 		return fixture.constructGreeter(), nil
-	case "callback_roundtrip":
+	case "CallbackRoundtrip":
 		return fixture.callbackRoundtrip(), nil
-	case "object_argument_roundtrip":
+	case "ObjectArgumentRoundtrip":
 		return fixture.objectArgumentRoundtrip(), nil
-	case "error_propagation":
+	case "ErrorPropagation":
 		return fixture.errorPropagation(), nil
-	case "shared_reference_consistency":
+	case "SharedReferenceConsistency":
 		return fixture.sharedReferenceConsistency(), nil
-	case "explicit_release":
+	case "ExplicitRelease":
 		return fixture.explicitRelease()
 	default:
 		return nil, errors.New("unsupported")
@@ -216,10 +318,11 @@ func serve() error {
 
 			encoder := json.NewEncoder(connection)
 			for _, scenario := range scenarios {
-				if !fixture.hasCapability(scenario) {
+				canonical := normalizeScenario(scenario)
+				if canonical == "" || !fixture.hasCapability(canonical) {
 					_ = encoder.Encode(map[string]interface{}{
-						"type":      "scenario",
-						"scenario": scenario,
+						"type":     "scenario",
+						"scenario": canonicalOrOriginal(canonical, scenario),
 						"status":   "unsupported",
 						"protocol": protocol,
 						"message":  "unsupported",
@@ -227,11 +330,11 @@ func serve() error {
 					continue
 				}
 
-				actual, err := runScenario(fixture, scenario)
+				actual, err := runScenario(fixture, canonical)
 				if err != nil {
 					_ = encoder.Encode(map[string]interface{}{
-						"type":      "scenario",
-						"scenario": scenario,
+						"type":     "scenario",
+						"scenario": canonical,
 						"status":   "unsupported",
 						"protocol": protocol,
 						"message":  err.Error(),
@@ -240,8 +343,8 @@ func serve() error {
 				}
 
 				_ = encoder.Encode(map[string]interface{}{
-					"type":      "scenario",
-					"scenario": scenario,
+					"type":     "scenario",
+					"scenario": canonical,
 					"status":   "passed",
 					"protocol": protocol,
 					"actual":   actual,
@@ -258,7 +361,10 @@ func drive(host string, port int, scenarios string) error {
 	}
 	defer conn.Close()
 
-	requested := parseScenarios(scenarios)
+	requested := make([]string, 0, len(parseScenarios(scenarios)))
+	for _, scenario := range parseScenarios(scenarios) {
+		requested = append(requested, canonicalOrOriginal(normalizeScenario(scenario), scenario))
+	}
 	request := strings.Join(requested, ",") + "\n"
 	_, err = conn.Write([]byte(request))
 	if err != nil {
@@ -287,7 +393,7 @@ func drive(host string, port int, scenarios string) error {
 			continue
 		}
 		emit(map[string]interface{}{
-			"type":      "scenario",
+			"type":     "scenario",
 			"scenario": scenario,
 			"status":   "failed",
 			"protocol": protocol,
