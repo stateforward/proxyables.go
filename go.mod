@@ -1,6 +1,6 @@
 module proxyables
 
-go 1.25.3
+go 1.24.5
 
 require (
 	github.com/hashicorp/yamux v0.1.1
@@ -9,5 +9,3 @@ require (
 )
 
 require github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
-
-replace github.com/stateforward/hsm.go/muid => ../../hsm/hsm.go/muid
