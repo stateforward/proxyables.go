@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -844,20 +845,7 @@ func maxInt64(left, right int64) int64 {
 	return right
 }
 
-func runScenario(host string, port int, serverLang string, scenario string, soakIterations int, cleanupTimeout float64, payloadBytes int, concurrency int, profile string) (interface{}, error) {
-	addr := fmt.Sprintf("%s:%d", host, port)
-	conn, err := net.Dial("tcp", addr)
-	if err != nil {
-		return nil, err
-	}
-	defer conn.Close()
-
-	proxy, imported, err := proxyables.ImportFrom(conn, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer imported.Close()
-
+func runScenarioWithProxy(proxy *proxyables.ProxyCursor, serverLang string, scenario string, soakIterations int, cleanupTimeout float64, payloadBytes int, concurrency int, profile string) (interface{}, error) {
 	if profile != "multihop" {
 		if actual, handled, err := runRealGCScenario(proxy, scenario, serverLang, cleanupTimeout); handled {
 			return actual, err
@@ -887,6 +875,23 @@ func runScenario(host string, port int, serverLang string, scenario string, soak
 		}
 	}
 	return result.Value, nil
+}
+
+func runScenario(host string, port int, serverLang string, scenario string, soakIterations int, cleanupTimeout float64, payloadBytes int, concurrency int, profile string) (interface{}, error) {
+	addr := fmt.Sprintf("%s:%d", host, port)
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+
+	proxy, imported, err := proxyables.ImportFrom(conn, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer imported.Close()
+
+	return runScenarioWithProxy(proxy, serverLang, scenario, soakIterations, cleanupTimeout, payloadBytes, concurrency, profile)
 }
 
 func parseScenarios(raw string) []string {
@@ -943,6 +948,153 @@ func drive(host string, port int, serverLang string, scenarios string, soakItera
 	return nil
 }
 
+func contains(items []string, value string) bool {
+	for _, item := range items {
+		if item == value {
+			return true
+		}
+	}
+	return false
+}
+
+func buildBenchmarkMetrics(samples []float64) map[string]interface{} {
+	ordered := append([]float64(nil), samples...)
+	sort.Float64s(ordered)
+	totalMs := 0.0
+	for _, sample := range samples {
+		totalMs += sample
+	}
+	pick := func(fraction float64) float64 {
+		if len(ordered) == 0 {
+			return 0
+		}
+		index := int(float64(len(ordered)-1) * fraction)
+		if index < 0 {
+			index = 0
+		}
+		if index >= len(ordered) {
+			index = len(ordered) - 1
+		}
+		return ordered[index]
+	}
+	avgMs := 0.0
+	ops := 0.0
+	minMs := 0.0
+	maxMs := 0.0
+	if len(ordered) > 0 {
+		minMs = ordered[0]
+		maxMs = ordered[len(ordered)-1]
+	}
+	if len(samples) > 0 {
+		avgMs = totalMs / float64(len(samples))
+	}
+	if totalMs > 0 {
+		ops = (float64(len(samples)) / totalMs) * 1000
+	}
+	return map[string]interface{}{
+		"totalMs": totalMs,
+		"avgMs":   avgMs,
+		"ops":     ops,
+		"p50Ms":   pick(0.5),
+		"p95Ms":   pick(0.95),
+		"minMs":   minMs,
+		"maxMs":   maxMs,
+	}
+}
+
+func bench(host string, port int, serverLang string, scenarios string, iterations int, warmup int, payloadBytes int) error {
+	requested := parseScenarios(scenarios)
+	for _, scenario := range requested {
+		canonical := normalizeScenario(scenario)
+		reported := scenario
+		if canonical != "" {
+			reported = canonical
+		}
+		if canonical == "" || !contains(capabilities, canonical) {
+			emit(map[string]interface{}{
+				"type":     "benchmark",
+				"scenario": reported,
+				"status":   "unsupported",
+				"protocol": protocol,
+				"message":  "unsupported",
+			})
+			continue
+		}
+
+		addr := fmt.Sprintf("%s:%d", host, port)
+		conn, err := net.Dial("tcp", addr)
+		if err != nil {
+			emit(map[string]interface{}{
+				"type":     "benchmark",
+				"scenario": canonical,
+				"status":   "failed",
+				"protocol": protocol,
+				"message":  err.Error(),
+			})
+			continue
+		}
+		proxy, imported, err := proxyables.ImportFrom(conn, nil)
+		if err != nil {
+			_ = conn.Close()
+			emit(map[string]interface{}{
+				"type":     "benchmark",
+				"scenario": canonical,
+				"status":   "failed",
+				"protocol": protocol,
+				"message":  err.Error(),
+			})
+			continue
+		}
+
+		failed := false
+		fail := func(err error) {
+			failed = true
+			emit(map[string]interface{}{
+				"type":     "benchmark",
+				"scenario": canonical,
+				"status":   "failed",
+				"protocol": protocol,
+				"message":  err.Error(),
+			})
+		}
+
+		for index := 0; index < warmup; index++ {
+			if _, err := runScenarioWithProxy(proxy, serverLang, canonical, 32, 0, payloadBytes, 8, "benchmark"); err != nil {
+				fail(err)
+				break
+			}
+		}
+		samples := make([]float64, 0, iterations)
+		if !failed {
+			for index := 0; index < iterations; index++ {
+				start := time.Now()
+				if _, err := runScenarioWithProxy(proxy, serverLang, canonical, 32, 0, payloadBytes, 8, "benchmark"); err != nil {
+					fail(err)
+					break
+				}
+				samples = append(samples, float64(time.Since(start).Nanoseconds())/1_000_000)
+			}
+		}
+
+		imported.Close()
+		_ = conn.Close()
+
+		if failed {
+			continue
+		}
+		emit(map[string]interface{}{
+			"type":       "benchmark",
+			"scenario":   canonical,
+			"status":     "passed",
+			"protocol":   protocol,
+			"iterations": iterations,
+			"warmup":     warmup,
+			"metrics":    buildBenchmarkMetrics(samples),
+		})
+	}
+	return nil
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Fprintln(os.Stderr, "expected mode")
@@ -980,6 +1132,20 @@ func main() {
 		_ = fs.Float64("disconnect-timeout", 5, "")
 		_ = fs.Parse(os.Args[2:])
 		if err := drive(*host, *port, *serverLang, *scenarios, *soakIterations, *cleanupTimeout, *payloadBytes, *concurrency, *profile); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	case "bench":
+		fs := flag.NewFlagSet("bench", flag.ExitOnError)
+		host := fs.String("host", "127.0.0.1", "")
+		port := fs.Int("port", 0, "")
+		serverLang := fs.String("server-lang", "", "")
+		scenarios := fs.String("scenarios", "", "")
+		iterations := fs.Int("iterations", 1000, "")
+		warmup := fs.Int("warmup", 100, "")
+		payloadBytes := fs.Int("payload-bytes", 32768, "")
+		_ = fs.Parse(os.Args[2:])
+		if err := bench(*host, *port, *serverLang, *scenarios, *iterations, *warmup, *payloadBytes); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
